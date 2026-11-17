@@ -27,9 +27,14 @@ body{
   overscroll-behavior-y:none;
 }
 body.locked{overflow:hidden}
-input,select,button,textarea{font-family:inherit;-webkit-user-select:text;user-select:text}
-button{cursor:pointer;border:none;background:none;color:inherit;padding:0;touch-action:manipulation}
+input,select,button,textarea{font-family:inherit}
+input,select,textarea{-webkit-user-select:text;user-select:text}
+button{cursor:pointer;border:none;background:none;color:inherit;padding:0;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 button:active{opacity:.6}
+#toast{position:fixed;left:16px;right:16px;bottom:calc(var(--safe-b) + 92px);z-index:2000;display:none;align-items:center;justify-content:space-between;gap:12px;
+  background:#2C2C2E;color:#fff;border-radius:14px;padding:12px 16px;font-size:15px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+#toast.show{display:flex;animation:up .2s ease-out}
+#toast button{color:#5AC8FA;font-weight:700;font-size:15px;padding:6px 4px}
 
 .top{display:flex;align-items:center;justify-content:space-between;margin:4px 4px 6px}
 .top h1{font-size:28px;letter-spacing:-.8px;margin:0}
@@ -132,6 +137,8 @@ button:active{opacity:.6}
 <button class="add-btn" data-act="add">＋ Новый прибор</button>
 <div id="result-area"></div>
 
+<div id="toast" role="status"><span id="toast-msg"></span><button id="toast-btn" data-act="toastAction"></button></div>
+
 <div class="fab-group" id="fabs">
   <button class="fab-btn" style="background:var(--orange)" data-act="openPwr">⚡ POWER</button>
   <button class="fab-btn" style="background:var(--blue)" data-act="openAddr">📍 ADDR</button>
@@ -181,6 +188,7 @@ button:active{opacity:.6}
     <div class="field"><label for="e-w">Мощность, Вт</label><input id="e-w" type="number" inputmode="numeric" min="0" max="100000" placeholder="750"></div>
     <div class="field"><label for="e-modes">Режимы (каналы)</label><input id="e-modes" type="text" inputmode="text" autocomplete="off" placeholder="35, 21"><small>Через запятую. Каждое число — количество каналов (1–512).</small></div>
     <div class="err" id="e-err"></div>
+    <button class="btn plain" id="e-dup" data-act="duplicateFixture">Дублировать прибор</button>
     <button class="btn danger" id="e-del" data-act="deleteFixture">Удалить прибор</button>
   </div>
 </div>
@@ -374,6 +382,7 @@ function renderResults() {
       <div class="plist">${rows.map(p => `<div class="prow"><span>${esc(p.name)} #${p.i}</span><span class="paddr"><b>${p.a}</b><small>–${p.a + p.ch - 1}</small></span></div>`).join('')}</div>`;
   });
   if (truncated) html += `<div class="note">Показаны первые ${MAX_ROWS} приборов.</div>`;
+  html += '<button class="btn plain" data-act="copyPatch" style="margin-top:20px">📋 Скопировать патч</button>';
   html += '<button class="link-red" data-act="resetQty">Очистить все вычисления</button>';
   res.innerHTML = html;
 }
@@ -444,9 +453,38 @@ function recompute() {
   totalW = state.fixtures.reduce((s, f) => s + f.qty * f.w, 0);
   syncProgress();
   renderResults();
-  if (isOpen('addr')) renderAddr();
-  if (isOpen('pwr')) renderPwr();
+  renderAddr();   // всегда, даже если окно закрыто: иначе остаются устаревшие цифры
+  renderPwr();
   save();
+}
+
+/* ---------- Уведомление с отменой ---------- */
+let toastTimer = null, toastFn = null;
+function showToast(msg, label, fn) {
+  $('toast-msg').textContent = msg;
+  const b = $('toast-btn');
+  b.textContent = label || ''; b.style.display = label ? '' : 'none';
+  toastFn = fn || null;
+  $('toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, 6000);
+}
+function hideToast() { clearTimeout(toastTimer); toastFn = null; $('toast').classList.remove('show'); }
+
+/* ---------- Полная очистка ---------- */
+function clearAll() {
+  const snapshot = state.fixtures.filter(f => f.qty > 0).map(f => [f.id, f.qty]);
+  state.fixtures.forEach(f => { f.qty = 0; });
+  progress = {}; history = []; sig = '';
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  stack.slice().forEach(id => { if (id === 'addr' || id === 'pwr') closeLayer(id); });
+  renderList();
+  recompute();
+  if (snapshot.length) showToast('Вычисления очищены', 'Отменить', () => {
+    snapshot.forEach(([id, q]) => { const f = find(id); if (f) f.qty = q; });
+    renderList();
+    recompute();
+  });
 }
 
 /* ---------- Слои (оверлеи) ---------- */
@@ -462,6 +500,7 @@ function openLayer(id) {
   if (isOpen(id)) return;
   stack.push(id);
   $('layer-' + id).classList.add('open');
+  if (id === 'addr') lockScreen();
   syncChrome();
 }
 function closeLayer(id) {
@@ -469,6 +508,7 @@ function closeLayer(id) {
   if (i < 0) return;
   stack.splice(i, 1);
   $('layer-' + id).classList.remove('open');
+  if (id === 'addr') unlockScreen();
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   syncChrome();
 }
@@ -494,6 +534,7 @@ function openEdit(id) {
   $('e-modes').value = f ? f.modes.join(', ') : '';
   $('e-err').textContent = '';
   $('e-del').style.display = f ? 'block' : 'none';
+  $('e-dup').style.display = f ? 'block' : 'none';
   $('cat-list').innerHTML = [...groups().keys()].map(c => `<option value="${esc(c)}">`).join('');
   resetArmed();
   openLayer('edit');
@@ -540,6 +581,55 @@ function deleteFixture() {
   recompute();
 }
 
+function duplicateFixture() {
+  const src = editingId && find(editingId);
+  if (!src) return;
+  if (state.fixtures.length >= MAX_FIXTURES) { showToast('Достигнут лимит приборов'); return; }
+  const names = new Set(state.fixtures.map(f => f.name.toLowerCase()));
+  let name = (src.name + ' копия').slice(0, 40), n = 2;
+  while (names.has(name.toLowerCase())) name = (src.name.slice(0, 34) + ' копия ' + n++).slice(0, 40);
+  const copy = { id: uid(), cat: src.cat, name, w: src.w, modes: src.modes.slice(), mode: src.mode, qty: 0 };
+  state.fixtures.splice(state.fixtures.indexOf(src) + 1, 0, copy);
+  closeLayer('edit');
+  renderList();
+  recompute();
+  openEdit(copy.id);
+}
+
+/* ---------- Копирование патча ---------- */
+function patchText() {
+  const byU = new Map();
+  patch.forEach(p => { if (!byU.has(p.u)) byU.set(p.u, []); byU.get(p.u).push(p); });
+  return [...byU.keys()].sort((a, b) => a - b).map(u =>
+    `Universe ${u}\n` + byU.get(u).map(p => `${p.name} #${p.i}\t${p.a}–${p.a + p.ch - 1}`).join('\n')).join('\n\n');
+}
+function copyPatch() {
+  const text = patchText();
+  if (!text) return;
+  const done = () => { haptic('light'); showToast('Патч скопирован'); };
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.cssText = 'position:fixed;opacity:0;top:0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      ok ? done() : showToast('Не удалось скопировать');
+    } catch (e) { showToast('Не удалось скопировать'); }
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  } catch (e) { fallback(); }
+}
+
+/* ---------- Экран не гаснет при адресации ---------- */
+let wakeLock = null;
+async function lockScreen() {
+  try { if (navigator.wakeLock && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { wakeLock = null; }
+}
+function unlockScreen() { try { if (wakeLock) wakeLock.release(); } catch (e) {} wakeLock = null; }
+
 /* ---------- Настройки ---------- */
 function openSettings() {
   $('s-uni').value = state.settings.startUni;
@@ -557,11 +647,8 @@ function saveSettings() {
   recompute();
 }
 function resetQty() {
-  state.fixtures.forEach(f => f.qty = 0);
-  progress = {}; history = [];
-  renderList();
-  recompute();
   closeLayer('settings');
+  clearAll();
 }
 function resetLib() {
   if (!libArmed) {
@@ -571,7 +658,8 @@ function resetLib() {
     return;
   }
   state = { fixtures: defaultFixtures(), settings: { startUni: 1, startAddr: 1 } };
-  progress = {}; history = [];
+  progress = {}; history = []; sig = '';
+  hideToast();
   closeLayer('settings');
   renderList();
   recompute();
@@ -583,18 +671,42 @@ function setQty(f, v, inputEl) {
   if (inputEl) inputEl.value = f.qty;
   recompute();
 }
+/* удержание «+» / «−» — быстрый набор количества */
+let holdTimer = null, holdIv = null, holdFired = false;
+function stepQty(id, d) {
+  const f = find(id); if (!f) return false;
+  const next = clamp(f.qty + d, 0, MAX_QTY);
+  const changed = next !== f.qty;
+  setQty(f, next, document.querySelector(`.qty-input[data-id="${id}"]`));
+  if (changed) haptic('select');
+  return changed;
+}
+function stopHold() { clearTimeout(holdTimer); clearInterval(holdIv); holdTimer = holdIv = null; }
+document.addEventListener('pointerdown', e => {
+  const b = e.target.closest && e.target.closest('.step-btn');
+  if (!b) return;
+  holdFired = false; stopHold();
+  const id = b.dataset.id, d = b.dataset.act === 'inc' ? 1 : -1;
+  holdTimer = setTimeout(() => {
+    holdFired = true;
+    holdIv = setInterval(() => { if (!stepQty(id, d)) stopHold(); }, 90);
+  }, 450);
+});
+['pointerup', 'pointercancel', 'pointerleave', 'dragstart'].forEach(ev => document.addEventListener(ev, stopHold, true));
+document.addEventListener('contextmenu', e => { if (e.target.closest && e.target.closest('.step-btn')) e.preventDefault(); });
+
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act, id = el.dataset.id;
   switch (act) {
-    case 'inc': case 'dec': {
-      const f = find(id); if (!f) return;
-      const inp = document.querySelector(`.qty-input[data-id="${id}"]`);
-      setQty(f, f.qty + (act === 'inc' ? 1 : -1), inp);
-      haptic('select');
+    case 'inc': case 'dec':
+      if (holdFired) { holdFired = false; return; }  // клик после удержания уже учтён
+      stepQty(id, act === 'inc' ? 1 : -1);
       break;
-    }
+    case 'duplicateFixture': duplicateFixture(); break;
+    case 'copyPatch': copyPatch(); break;
+    case 'toastAction': { const fn = toastFn; hideToast(); if (fn) fn(); break; }
     case 'edit': openEdit(id); break;
     case 'add': openEdit(null); break;
     case 'saveFixture': saveFixture(); break;
@@ -638,7 +750,10 @@ document.addEventListener('focusin', e => {
   if (e.target.classList && e.target.classList.contains('qty-input')) setTimeout(() => { try { e.target.select(); } catch (x) {} }, 0);
 });
 window.addEventListener('pagehide', save);
-document.addEventListener('visibilitychange', () => { if (document.hidden) save(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { save(); stopHold(); }
+  else if (isOpen('addr')) lockScreen();
+});
 
 /* ---------- Старт ---------- */
 renderList();
